@@ -1,0 +1,654 @@
+#!/usr/bin/env bash
+#
+
+set -eEu  # for your sanity, really. Or, at least use -e!
+
+# FIXME: stack trace printed is, sometimes, not accurate or not precise...
+#        If you know a better way please let me know!
+print_stack_trace() {
+    local err_cmd=$BASH_COMMAND
+    echo 
+    if [[ ${DASH_ERROR:-} ]]; then
+        echo "$DASH_ERROR"
+    fi
+    echo "Stack trace from ERR trap: --------"
+    local i=0; while caller $((i++)); do :; done
+    echo
+    echo "Failed command is: $err_cmd"
+} >&2
+trap print_stack_trace ERR
+
+
+# helpers for running our test functions
+source "${0%/*}/test.sh"
+
+# source it! Make sure it's executable and in your PATH.
+source dash
+
+log_case() { echo "....$*"; }
+
+test_indexed_items_and_arrays() {
+
+    # Make a 'it' var an alias to the current dash node.
+    local -n it=$DASH_NODE
+
+    # At any moment, $DASH_NODE expands to the name of an associative array
+    # that represents the current node.
+
+    local value
+    echo
+
+    log_case "The global context is an associative array."
+    [[ "$(declare -p $DASH_NODE)" == "declare -A "* ]]
+
+    log_case "An empty indexed item, with index 0."
+    -; [[ ${it[0]} = '' ]]
+    
+    log_case "A simple indexed item with some string at index 1."
+    value="the second item at index 1"
+    - "$value"
+    [[ ${it[1]} = "$value" ]]
+
+    log_case "An array under an explicit index(3), which jumps over the next implicit index(2)."
+    value="array under an explicit index"
+    - 3: $value
+    local -n node=${it[3]}
+    [[ $(declare -p ${it[3]}) == "declare -a "* ]]
+    [[ ${node[*]} = "$value" ]]
+    [[ ${#node[*]} = 5 ]]
+    [[ ${#it[*]} = 3 ]]
+
+    # NOTE: an explicitly indexed item is always a "node", which can be either
+    #       an (indexed) array or an associative array.
+
+    log_case "The next implicitly indexed item should start from the current max index + 1."
+    value="another implicitly indexed item"
+    - "$value"
+    [[ ${it[4]} = "$value" ]]
+
+    log_case "An array under an implicit index."
+    value="an array under an implicit index"
+    - : $value
+    local -n node=${it[5]}
+    [[ ${node[*]} = "$value" ]]
+    [[ ${#node[*]} = 6 ]]
+    [[ ${#it[*]} = 5 ]]
+
+    -reset
+}
+
+test_string_items_and_arrays() {
+    local -n it=$DASH_NODE
+    echo
+
+    log_case "Keyed items are name=value pairs, each forms a single argument to -."
+    - name1=value1 name2=value\ 2
+    - "name 3=value 3"
+    [[ ${it[name1]} = value1 ]]
+    [[ ${it[name2]} = value\ 2 ]]
+    [[ ${it[name 3]} = value\ 3 ]]
+
+    log_case "A string item without an explicit name is assumed to have name same as value."
+    - =created initialized done
+    [[ ${it[created]} = created ]]
+    [[ ${it[initialized]} = initialized ]]
+    [[ ${it[done]} = done ]]
+
+    log_case "Using '- name: value' instead of '- name=value' for single value"
+    - name4: value4
+
+    local -n it=${it[name4]}
+    [[ $it == value4 ]]
+
+    -reset
+}
+
+test_mixing_named_and_indexed_items() {
+    local -n it=$DASH_NODE
+    echo
+    - "a named item=some value"
+    - an indexed item
+    - another indexed item
+    - name-one="value one" name-two=value_2
+    - 4: an array indexed under 4
+
+    [[ ${it[0]} = "an indexed item" ]]
+    [[ ${it[1]} = "another indexed item" ]]
+    [[ ${it[a named item]} = "some value" ]]
+    [[ ${it[name-one]} = "value one" ]]
+    [[ ${it[name-two]} = "value_2" ]]
+
+    local -n node=${it[4]}
+    [[ ${node[*]} = "an array indexed under 4" ]]
+    [[ ${#node[*]} = 5 ]]
+
+    [[ ${#it[*]} = 6 ]]
+
+    -reset
+}
+
+test_hash_nodes_and_nesting() {
+    local -n it=$DASH_NODE
+    echo
+
+    log_case "A hash node(associative array) under a name."
+
+    - "a parent node":
+    # NOTE: A hash node opens a new context.
+    #       Any subsequent '-' commands then operate in that context until
+    #       a '---' command is executed, which returns us to the previous
+    #       context.
+    #
+    # Notice that the colon(:) must be the last character of the first
+    # argument to '-' and that there should be no more arguments follows it.
+    #
+    [[ ${!it[*]} = "a parent node" ]]
+
+      log_case "Adding items to it"
+
+      - with an indexed item  # indexed, because no ='s and no :'s.
+      - "a name item"=value
+
+      local -n it=$DASH_NODE
+      [[ ${it[0]} = "with an indexed item" ]]
+      [[ ${it[a name item]} = value ]]
+
+      log_case "Nesting an indexed array under a name in it."
+
+      # This is an indexed array under a name/key because first argument to
+      # '-' ends with ':' but more arguments follows it.
+      #
+      - a-named-indexed-array: \
+          one \
+          two \
+          three
+      # NOTE: An indexed array node, however, doesn't open a new context for
+      #       following '-' commands. Or, you can think of it as: it closes
+      #       its context as soon as it consumed all its arguments.
+      #
+      # As a consequence, an indexed array cannot contain other nodes.
+      local -n it=${it[a-named-indexed-array]} 
+      [[ ${it[*]} = "one two three" ]]
+
+      log_case "Nesting an empty hash node under an implicit index."
+
+      - : # this opens an empty hash node.
+      ---
+      local -n it=$DASH_NODE
+      local -n it=${it[1]}
+      [[ ${#it[*]} = 0 ]]
+
+      log_case "Nesting a named hash node."
+      - a-child-node:
+
+        log_case "Nesting an indexed array under an implicit index." 
+        - : apple banana orange
+
+        log_case "Nesting a special case: an indexed array written using the hash node syntax."
+        - another-child-node:
+          - item 1
+          - item 2
+          - :
+            - item 3-1
+            - item 3-2
+          ---
+          # NOTE: as a special case, if a node contains only indexed items,
+          #       that is, no named child nodes and no keyed, name=value, items,
+          #       then dash will automatically convert the node to an
+          #       indexed array upon leaving the current context.
+        ---
+
+        log_case "Nesting a named indexed array within a nested hash node."
+        - colors: red green blue  # indexed array
+
+      log_case "Redefining an existing array node should give an error."
+      if - 0: a b c; then false; fi
+
+      --- end of a-child-node  # NOTE: '---' doesn't care about its arguments.
+
+      log_case "Redefining an existing hash node should give an error."
+      if - a-child-node:; then false; fi
+
+      local -n node=$DASH_NODE
+      local -n node=${node[a-child-node]}
+      [[ ${#node[*]} = 3 ]]
+
+      local -n it=${node[0]}  # Notice the index starts fresh from 0 in a new/sub node
+      [[ ${it[*]} = "apple banana orange" ]]
+
+      [[ $(declare -p ${node[another-child-node]}) == "declare -a "* ]]
+      local -n it=${node[another-child-node]}
+      [[ ${it[0]} = "item 1" ]]
+      [[ ${it[1]} = "item 2" ]]
+
+      [[ $(declare -p ${it[2]}) == "declare -a "* ]]
+      local -n it=${it[2]}
+      [[ ${it[0]} = "item 3-1" ]]
+      [[ ${it[1]} = "item 3-2" ]]
+
+      local -n it=${node[colors]}
+      [[ ${#it[*]} = 3 ]]
+      [[ ${it[*]} = "red green blue" ]]
+
+      log_case "Nesting a non-empty hash node under an implicit index."
+      - :
+        - key1=value1
+        - key2=value2
+      ---
+
+    --- end of a parent node
+    --- # '---' can be run as many times as you want
+    --- # every time it's called, it leaves the current context until you
+        # reach the root node.(i.e. the default/global context)
+
+    local -n it=$DASH_NODE
+    [[ ${#it[*]} = 1 ]]
+    [[ ${!it[*]} = "a parent node" ]]
+    
+    -reset
+}
+
+
+# this is basically the data and checks from the previous test case...
+test_dump() {
+    - "a parent node":
+      - "with an indexed item"
+      - "a name item"=value
+      - a-named-indexed-array: \
+          one \
+          two \
+          three
+      - :
+      ---
+      - a-child-node:
+        - : apple banana orange
+        - another-child-node:
+          - item 1
+          - item 2
+          - :
+            - item 3-1
+            - item 3-2
+          ---
+        ---
+        - colors: red green blue
+      --- end of a-child-node
+      - :
+        - key1=value1
+        - key2=value2
+      ---
+    --- end of a parent node
+
+    local data; data=$(-dump /)
+    echo
+    echo "$data"
+    -reset
+    source <(echo "$data")
+
+    local -n it=$DASH_NODE
+    [[ ${!it[*]} = "a parent node" ]]
+
+    local -n node=${it[a parent node]}
+    [[ ${node[0]} = "with an indexed item" ]]
+
+    [[ ${node[a name item]} = value ]]
+    local -n it=${node[a-named-indexed-array]}
+    [[ ${it[*]} = "one two three" ]]
+
+    local -n it=${node[1]}
+    [[ ${it[*]:-} = "" ]]
+
+    local -n node=${node[a-child-node]}
+    [[ ${#node[*]} = 3 ]]
+
+    local -n it=${node[0]}
+    [[ ${it[*]} = "apple banana orange" ]]
+
+    [[ $(declare -p ${node[another-child-node]}) == "declare -a "* ]]
+    local -n it=${node[another-child-node]}
+    [[ ${it[0]} = "item 1" ]]
+    [[ ${it[1]} = "item 2" ]]
+
+    [[ $(declare -p ${it[2]}) == "declare -a "* ]]
+    local -n it=${it[2]}
+    [[ ${it[0]} = "item 3-1" ]]
+    [[ ${it[1]} = "item 3-2" ]]
+
+    local -n it=${node[colors]}
+    [[ ${#it[*]} = 3 ]]
+    [[ ${it[*]} = "red green blue" ]]
+
+    -reset
+}
+
+test_item_names_with_escapes() {
+    - 'name_with_a_equal_sign_\=_in_it'=something
+    - 'name_with_a_backslash_at_the_end\\=another thing'
+    - 'a\=b\\\=c\\\\=d\\\'  # name is 'a=b\=c\\' and value is 'd\\\'
+
+    - a: a=xxx:      # name is 'a' and a[0] is 'a=xxx:'
+    - 'a: a=xxx\:'   # name is 'a: a' and value is 'xxx\:'
+    - 'a: a\=xxx\:'  # item 0 is 'a: a=xxx:'
+    - 'a\: a\=xxx\:' # item 0 is 'a\: a=xxx:'
+    - 'a\\\: a\\\=xxx\\\:'   # item 0 is 'a\\: a\=xxx\:'
+    - 'a: a\\\\=xxx\\\:'     # name is 'a: a\\' value is 'xxx\\\:'
+
+    local -n it=$DASH_NODE
+
+    [[ ${it['name_with_a_equal_sign_=_in_it']} == something ]]
+    [[ ${it['name_with_a_equal_sign_=_in_it']} == something ]]
+    [[ ${it['name_with_a_backslash_at_the_end\']} == 'another thing' ]]
+    [[ ${it['a=b\=c\\']} == 'd\\\' ]]
+
+    local -n node=${it[a]}
+    [[ ${node[0]} == a=xxx: ]]
+
+    [[ ${it[a: a]} == 'xxx\:' ]]
+
+    [[ ${it[0]} == 'a: a=xxx:' ]]
+    [[ ${it[1]} == 'a\: a=xxx:' ]]
+    [[ ${it[2]} == 'a\\: a\=xxx\:' ]]
+
+    [[ ${it['a: a\\']} == 'xxx\\\:' ]]
+
+    -reset
+}
+
+test_aliasing_a_node_under_a_different_name() {
+    - start:
+      - one:
+        - two:   ; here=$DASH_TOP; local -n two=$DASH_NODE
+          - name1=value1
+          - item 1
+          - array: a b c
+          - three:
+            - name2=value2
+    -cd /
+    = ref-two "$here"
+
+    two[name1]=111
+    two[1]=item2
+    local -n three=${two[three]}
+    three[name3]=value3
+
+    local -n it=$DASH_NODE
+    [[ ${#it[*]} = 2 ]]
+
+    local -n it=${it[ref-two]}
+    [[ ${#it[*]} = 5 ]]
+    [[ ${it[name1]} = 111 ]]
+    [[ ${it[0]} = "item 1" ]]
+    [[ ${it[1]} = "item2" ]]
+
+    local -n node=${it[array]}
+    [[ ${node[*]} = "a b c" ]]
+
+    local -n node=${it[three]}
+    [[ ${#node[*]} = 2 ]]
+    [[ ${node[name2]} = value2 ]]
+    [[ ${node[name3]} = value3 ]]
+
+    -reset
+}
+
+test_node_aliasing_with_cycle_detection() {
+    - node1: ; node1=$DASH_TOP
+      - node2:
+        if = node3 "$node1"; then false; fi
+      ---
+    ---
+    -reset
+}
+
+test_copying_a_node_to_be_under_a_different_node() {
+
+    - defaults:  ; defaults=$DASH_TOP
+      - name1=value1 name2=value2
+      - item 1
+      - item 2
+      - an\ array: a e i o u
+      - a-child-node:
+        - another-child-node:
+          - something
+        ---
+        - something something
+      ---
+    ---
+    - node1:
+      + "$defaults"
+      - name2=222
+      -cd a-child-node
+        - even something more
+    -cd /
+
+    local -n it=$DASH_NODE
+    local -n node1=${it[node1]}
+    
+    [[ ${#node1[*]} = 6 ]]
+    [[ ${node1[name1]} = value1 ]]
+    [[ ${node1[name2]} = 222 ]]
+
+    local -n child=${node1[a-child-node]}
+    [[ ${#child[*]} = 3 ]]
+    [[ ${child[0]} = "something something" ]]
+    [[ ${child[1]} = "even something more" ]]
+
+    local -n another=${child[another-child-node]}
+    [[ ${#another[*]} = 1 ]]
+    [[ ${another[0]} = something ]]
+
+    local -n it=$DASH_NODE
+    local -n it=${it[defaults]}
+    [[ ${it[name2]} = value2 ]]
+
+    local -n it=${it[a-child-node]}
+    [[ ${#it[*]} = 2 ]]
+
+    -reset
+}
+
+test_leaving_the_current_node() {
+    local root=$DASH_NODE
+    log_case "We'll never leave the root node."
+    ---; ---; ---
+    [[ $DASH_TOP = "$DASH_SEP" ]]
+    [[ $DASH_NODE = "$root" ]]
+    [[ $(declare -p "$DASH_NODE") == "declare -A "* ]]
+
+    log_case "Going up level by level till we reach root."
+    - a:
+      - b:
+        - c:
+    ---
+    [[ $DASH_TOP = "${DASH_SEP}a${DASH_SEP}b" ]]
+    local -n it=$DASH_NODE
+    [[ ${!it[*]} = c ]]
+    ---;
+    [[ $DASH_TOP = "${DASH_SEP}a" ]]
+    local -n it=$DASH_NODE
+    [[ ${!it[*]} = b ]]
+    ---;
+    [[ $DASH_TOP = "${DASH_SEP}" ]]
+    local -n it=$DASH_NODE
+    [[ ${!it[*]} = a ]]
+
+    -reset
+}
+
+test_cd() {
+    - node1:
+      - name1=value1
+      - item 1
+      - node2:
+        - item 2-1
+        - item 2-2
+        - :
+          - x
+          - y
+          - z
+          - :
+            - a
+            - b
+            - c
+          ---
+          - : 1 2 3 4
+          -cd /
+
+    -cd /node1
+    local -n it=$DASH_NODE
+    [[ ${it[name1]} = value1 ]]
+    [[ ${it[0]} = "item 1" ]]
+    [[ $(declare -p ${it[node2]}) == "declare -a "* ]]
+    -cd /node1/node2
+    local -n it=$DASH_NODE
+    [[ ${it[0]} = "item 2-1" ]]
+    [[ ${it[1]} = "item 2-2" ]]
+    [[ $(declare -p ${it[2]}) == "declare -a "* ]]
+
+    local -n it=${it[2]}
+    [[ ${it[*]} == "x y z "* && ${#it[*]} == 5 ]]
+
+    [[ $(-cat /node1/node2/2/3/1) == b ]]
+
+    -reset
+}
+
+test_cat() {
+    - name1=value1
+    - node1:
+      - node2:
+        - item 1
+        - name2=value2
+      ---
+      - a/path/like/node/name:
+        - owner=someone 
+        - mode=0755
+      ---
+    --- 
+    [[ $(-cat /) == "$DASH_NODE" ]]
+    [[ $(-cat /name1) == value1 ]]
+    [[ $(-cat /node1) == "${DASH_ROOT[node1]}" ]]
+    [[ $(-cat /node1/node2/0) == "item 1" ]]
+    [[ $(-cat /node1/node2/name2) == value2 ]]
+    [[ $(-cat -s . node1.node2.name2) == value2 ]]
+
+    [[ $(-cat -s . \
+          .node1.a/path/like/node/name.owner \
+          .node1.a/path/like/node/name.mode
+        ) == "someone
+0755" ]]
+
+    if -cat /path/that/does/not/exist; then false; fi
+
+    -reset
+}
+
+test_set() {
+    - first-name=Peter
+    - last-name=Parker
+    - database:
+      - staging:
+        - dbname=test_db
+        - username: guest1
+        - password=abc123
+      ---
+    ---
+    
+    local first last
+    -set first=/first-name last=last-name
+    [[ $first = Peter ]]
+    [[ $last = Parker ]]
+
+    local dbname
+    -set dbname=/database/staging/dbname
+    [[ $dbname = test_db ]]
+
+    local username password
+    -cd /database/staging
+    -set username password
+    -cd /
+    local -n username=$username
+    [[ $username = guest1 ]]
+    [[ $password = abc123 ]]
+
+    if -set dbname=whatever; then false; fi
+    if -set dbname=/a/b/c; then false; fi
+    -reset
+}
+
+test_do_with() {
+    - first-name=Peter
+    - last-name=Parker
+    - database:
+      - staging:
+        - dbname=test_db
+        - username: guest1
+        - password: abc123
+      ---
+    ---
+
+    local db first last user
+    -do() {
+        [[ ${db[dbname]} = test_db ]]
+        local -n username=${db[username]} password=${db[password]}
+        [[ $username = guest1 ]]
+        [[ $password = abc123 ]]
+        [[ $first = Peter ]]
+        [[ $last = Parker ]]
+        [[ $user = guest1 ]]
+    }; -with db=/database/staging \
+             user=/database/staging/username \
+             first=first-name last=/last-name
+
+    [[ ! ${db:-} ]]
+    [[ ! ${first:-} ]]
+    [[ ! ${last:-} ]]
+    [[ ! ${user:-} ]]
+
+    -reset
+}
+
+test_nested_do_with() {
+    - node1:
+      - name1=value1
+      - node2:
+        - name2=value2
+        - node3:
+          - name3=value3
+        ---
+      ---
+    ---
+    -do() {
+        node1[name1]=1
+        -do() {
+            [[ ${node1[name1]} = 1 ]]
+            node1[name1]=111
+            node2[name2]=2
+            -do() {
+                [[ ${node2[name2]} = 2 ]]
+                node2[name2]=222
+                node3[name3]=333
+            }; -with node3=/node1/node2/node3
+        }; -with node2=/node1/node2
+    }; -with node1
+
+    local -n it=$DASH_NODE
+    local -n it=${it[node1]}
+    [[ ${it[name1]} = 111 ]]
+
+    local -n it=${it[node2]}
+    [[ ${it[name2]} = 222 ]]
+
+    local -n it=${it[node3]}
+    [[ ${it[name3]} = 333 ]]
+
+    -reset
+}
+
+
+
+
+# run all test functions(test_*) in the order they appear if this script is
+# run from command line.
+if [[ "$BASH_SOURCE" = $0 ]]; then
+    test_run_all
+fi
