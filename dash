@@ -442,7 +442,7 @@ __dash_add_new_referenced_pathes() {
 
 # Like '=' but instead of creating an alias, it copies everything under the specified path($1)
 # over.
-+() {
++ () {
     #FIXME? I'm lazy..., this is slow but works for now.
     source <(__dash_dump_from_node_path 0 "$1") || return $?
 }
