@@ -448,8 +448,6 @@ __dash_add_new_referenced_pathes() {
 }
 
 
-#FIXME: -cd breaks '---' converting hash node to array node!
-
 -cd() {  # <node-path>
     local sep=/ option
     OPTIND=1

@@ -23,7 +23,7 @@ trap print_stack_trace ERR
 source "${0%/*}/test.sh"
 
 # source it! Make sure it's executable and in your PATH.
-source dash
+source dash.sh
 
 log_case() { echo "....$*"; }
 

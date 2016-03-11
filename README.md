@@ -1,6 +1,8 @@
 Dash - Write configurations in Bash
 -------------------------------------
 
+Sample config file, `/path/to/my/db.conf`:
+
 ```
 - defaults:        ; defaults=$DASH_TOP
   - port=5432
@@ -17,6 +19,7 @@ Dash - Write configurations in Bash
 
 - production:
   + "$defaults"
+  - username=demo
   - password=ADFASj1ADF814
   - database=production_db
   - host=production-db.example.com
@@ -32,10 +35,57 @@ Dash - Write configurations in Bash
 ---
 ```
 
-Yes, I'm aware there's a POSIX shell named, dash(the Debian Almquist shell).    
+
+Here's a script showing how you can load and work with the configuration:
+
+```
+#!/bin/bash
+
+set -eEu
+
+source dash.sh
+source /path/to/my/db.conf
+
+drop_all_tables() (  # [env]
+    local env=${1:-staging}
+
+    local -n conf; -set conf=/$env
+    local pg_args=(
+        -h "${conf[host]}" -p "${conf[port]}"
+        -U "${conf[username]}"
+        "${conf[database]}"
+    )
+    export PGPASSWORD=${conf[password]}
+
+    local tables
+    tables=$(psql -At "${pg_args[@]}" <<<"
+        SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';
+    ")
+
+    # Assuming no space or strange characters in table names
+    for t in $tables; do
+        echo "DROP TABLE IF EXISTS $t CASCADE;"
+    done \
+      | psql "${pg_args[@]}"
+)
+
+read -r -p "I'm about to drop all tables in the staging db! Cool? (y/n) "
+case $REPLY in
+  y|Y|yes) drop_all_tables staging;;
+        *) echo "Skipped!" ;;
+esac
+
+```
+
+
+In short, _Dash_ is a set of bash functions that help you compose
+arrays(indexed or associative), and work with the items nested in them
+easily.
 
 Hope you find this tool useful.
 Pull requests, bug reports, and suggestions, are always welcome.
+
+> Yes, I'm aware there's a POSIX shell named, dash(the Debian Almquist shell).    
 
 
 Table of Contents
