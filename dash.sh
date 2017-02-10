@@ -497,7 +497,7 @@ __dash_set_path_to_absolute() {
         [[ $part ]] || unset "parts[$i]"; ((++i))
     done
     path="$path${parts[*]:-}"
-    IFS=$oIFS; set -$oSet
+    IFS=$oIFS; set +f; set -$oSet
 
     # if path is relative, make it absolute
     if [[ $path != "$sep"* ]]; then
